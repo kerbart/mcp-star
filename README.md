@@ -19,7 +19,10 @@ A lightweight, single-file MCP (Model Context Protocol) server that automaticall
 
 ```bash
 # Clone or download the script
-pip install fastapi uvicorn httpx pyyaml
+# create your virtualenv
+python -m venv venv
+# install all dependencies
+pip install -r requirements.txt
 ```
 
 ### 🎯 Basic Usage
