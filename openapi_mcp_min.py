@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 openapi_mcp_min.py — Serveur MCP minimal en 1 fichier
-Usage: python openapi_mcp_min.py <OPENAPI_URL>
+Usage: python openapi_mcp_min.py <OPENAPI_URL> [--api-base-url API_BASE_URL] [--ignore-errors]
 """
 from __future__ import annotations
 import sys, os, json, re, asyncio
@@ -137,7 +137,7 @@ class Catalogue:
         self.base_url = base_url.rstrip("/")
         self.tools = tools
 
-async def build_catalogue(openapi_url: str) -> Catalogue:
+async def build_catalogue(openapi_url: str, custom_base_url: str = None) -> Catalogue:
     try:
         text = await fetch_text(openapi_url)
         spec = parse_openapi(text)
@@ -145,39 +145,43 @@ async def build_catalogue(openapi_url: str) -> Catalogue:
         print(f"Failed to load OpenAPI specification from {openapi_url}: {e}")
         raise RuntimeError(f"Cannot initialize MCP server: {str(e)}")
 
-    # Extract base URL from OpenAPI spec servers[0] or derive from openapi_url
+    # Extract base URL - priority: custom_base_url > OpenAPI spec > derive from openapi_url
     base_url = None
 
-    # Try to get from OpenAPI spec servers
-    if "servers" in spec and spec["servers"]:
-        server_url = spec["servers"][0].get("url", "")
-        if server_url:
-            # If server URL contains localhost, replace with actual host from openapi_url
-            if "localhost" in server_url or "127.0.0.1" in server_url:
-                from urllib.parse import urlparse
-                parsed_openapi = urlparse(openapi_url)
-                # Replace localhost with actual host but keep the port from the server URL
-                if "localhost:" in server_url:
-                    port = server_url.split("localhost:")[1].split("/")[0]
-                    base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc.split(':')[0]}:{port}"
-                elif "127.0.0.1:" in server_url:
-                    port = server_url.split("127.0.0.1:")[1].split("/")[0]
-                    base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc.split(':')[0]}:{port}"
+    # Priority 1: Use custom base URL if provided
+    if custom_base_url:
+        base_url = custom_base_url.rstrip("/")
+    else:
+        # Priority 2: Try to get from OpenAPI spec servers
+        if "servers" in spec and spec["servers"]:
+            server_url = spec["servers"][0].get("url", "")
+            if server_url:
+                # If server URL contains localhost, replace with actual host from openapi_url
+                if "localhost" in server_url or "127.0.0.1" in server_url:
+                    from urllib.parse import urlparse
+                    parsed_openapi = urlparse(openapi_url)
+                    # Replace localhost with actual host but keep the port from the server URL
+                    if "localhost:" in server_url:
+                        port = server_url.split("localhost:")[1].split("/")[0]
+                        base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc.split(':')[0]}:{port}"
+                    elif "127.0.0.1:" in server_url:
+                        port = server_url.split("127.0.0.1:")[1].split("/")[0]
+                        base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc.split(':')[0]}:{port}"
+                    else:
+                        # No port specified, use the openapi_url host and port
+                        base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc}"
                 else:
-                    # No port specified, use the openapi_url host and port
-                    base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc}"
-            else:
-                base_url = server_url.rstrip("/")
+                    base_url = server_url.rstrip("/")
 
-    # If no servers in spec, derive from openapi_url
-    if not base_url:
-        from urllib.parse import urlparse
-        parsed_openapi = urlparse(openapi_url)
-        base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc}"
+        # Priority 3: If no servers in spec, derive from openapi_url
+        if not base_url:
+            from urllib.parse import urlparse
+            parsed_openapi = urlparse(openapi_url)
+            base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc}"
 
-    # Fallback to environment variable or default
-    if not base_url:
-        base_url = os.getenv("API_BASE_URL", "https://shoes.kerliane.eu")
+        # Fallback to environment variable or default
+        if not base_url:
+            base_url = os.getenv("API_BASE_URL", "http://localhost:8080")
 
     base_url = base_url.rstrip("/")
 
@@ -205,6 +209,8 @@ async def build_catalogue(openapi_url: str) -> Catalogue:
     # Print detailed information about discovered tools and API configuration
     print(f"\n📋 API Configuration:", flush=True)
     print(f"   Base URL: {base_url}", flush=True)
+    if custom_base_url:
+        print(f"   ↳ Custom base URL provided via --api-base-url", flush=True)
     print(f"   Total tools discovered: {len(tools)}", flush=True)
 
     if tools:
@@ -283,17 +289,38 @@ async def call_backend(cat: Catalogue, tool: Tool, args: Dict[str, Any]) -> http
 # ------------------------------
 STATE: Dict[str, Any] = {"catalogue": None}
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup
+def parse_args():
+    """Parse command line arguments"""
     if len(sys.argv) < 2:
         raise RuntimeError("Missing required OpenAPI URL argument")
 
     openapi_url = sys.argv[1]
-    ignore_errors = "--ignore-errors" in sys.argv
+    custom_base_url = None
+    ignore_errors = False
+
+    i = 2
+    while i < len(sys.argv):
+        if sys.argv[i] == "--api-base-url" and i + 1 < len(sys.argv):
+            custom_base_url = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] == "--ignore-errors":
+            ignore_errors = True
+            i += 1
+        else:
+            # For backwards compatibility, treat unknown flags as ignore-errors
+            if sys.argv[i] == "--ignore-errors":
+                ignore_errors = True
+            i += 1
+
+    return openapi_url, custom_base_url, ignore_errors
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    openapi_url, custom_base_url, ignore_errors = parse_args()
 
     try:
-        STATE["catalogue"] = await build_catalogue(openapi_url)
+        STATE["catalogue"] = await build_catalogue(openapi_url, custom_base_url)
         print(f"✓ MCP server ready with {len(STATE['catalogue'].tools)} tools available", flush=True)
         print(f"✓ All API calls will be proxied to: {STATE['catalogue'].base_url}", flush=True)
     except Exception as e:
@@ -559,18 +586,20 @@ async def run_tool(tool_name: str = Path(...), payload: Dict[str, Any] | None = 
 
 def main():
     # Validate arguments early before starting FastAPI
-    if len(sys.argv) < 2:
-        print("Usage: python openapi_mcp_min.py <OPENAPI_URL> [--ignore-errors]")
+    try:
+        openapi_url, custom_base_url, ignore_errors = parse_args()
+    except RuntimeError as e:
+        print("Usage: python openapi_mcp_min.py <OPENAPI_URL> [--api-base-url API_BASE_URL] [--ignore-errors]")
         print("Example: python openapi_mcp_min.py http://localhost:8080/api-docs")
+        print("         python openapi_mcp_min.py http://localhost:8080/api-docs --api-base-url https://api.example.com")
         print("         python openapi_mcp_min.py http://localhost:8080/api-docs --ignore-errors")
+        print(f"\nError: {e}")
         sys.exit(2)
-
-    # Pre-validate the OpenAPI URL if not in ignore-errors mode
-    openapi_url = sys.argv[1]
-    ignore_errors = "--ignore-errors" in sys.argv
 
     if not ignore_errors:
         print(f"Validating OpenAPI URL: {openapi_url}", flush=True)
+        if custom_base_url:
+            print(f"Custom API base URL: {custom_base_url}", flush=True)
         try:
             # Test the connection before starting the server
             import asyncio
