@@ -12,6 +12,7 @@ A lightweight, single-file MCP (Model Context Protocol) server that automaticall
 - 🌐 **Format flexible**: Supports both JSON and YAML OpenAPI specs
 - ⚡ **Single file**: Just one Python file - easy to deploy anywhere
 - 🔧 **Zero config**: Works out of the box with any valid OpenAPI URL
+- 🎯 **Flexible API targeting**: Override API base URL independently from OpenAPI docs
 
 ## 🚀 Quick Start
 
@@ -41,8 +42,14 @@ PORT=7744 python openapi_mcp_min.py https://api.example.com/openapi.json
 ### 🛠️ Advanced Options
 
 ```bash
+# Override API base URL (useful when docs and API are hosted separately)
+python openapi_mcp_min.py http://localhost:8080/api-docs --api-base-url https://api.production.com
+
 # Start in degraded mode (even if API is unreachable)
 python openapi_mcp_min.py http://unreachable-api.com/docs --ignore-errors
+
+# Combine custom base URL with other options
+python openapi_mcp_min.py http://localhost:8080/api-docs --api-base-url https://api.example.com --ignore-errors
 
 # With custom port and error ignoring
 PORT=9000 python openapi_mcp_min.py http://localhost:3000/api-docs --ignore-errors
@@ -66,6 +73,17 @@ When starting successfully, you'll get detailed information about discovered too
 
 ✓ MCP server ready with 20 tools available
 ✓ All API calls will be proxied to: https://petstore.swagger.io
+```
+
+With custom base URL, you'll see:
+
+```
+📋 API Configuration:
+   Base URL: https://api.production.com
+   ↳ Custom base URL provided via --api-base-url
+   Total tools discovered: 20
+
+✓ All API calls will be proxied to: https://api.production.com
 ```
 
 ## 🔧 How It Works
@@ -133,6 +151,7 @@ python openapi_mcp_min.py https://self-signed-api.com/docs
 | `PORT` | Server port | `8765` |
 | `API_BEARER` | Bearer token for API auth | None |
 | `SKIP_TLS_VERIFY` | Skip TLS verification | `false` |
+| `API_BASE_URL` | Fallback API base URL | `http://localhost:8080` |
 
 ## 🎨 Examples
 
@@ -150,6 +169,12 @@ python openapi_mcp_min.py https://api.openweathermap.org/data/3.0/openapi.json
 ### 🔧 Local Development API
 ```bash
 python openapi_mcp_min.py http://localhost:3000/api-docs --ignore-errors
+```
+
+### 🏢 Production API with Separate Documentation
+```bash
+# Get OpenAPI docs from staging but proxy calls to production
+python openapi_mcp_min.py http://staging.api.com/docs --api-base-url https://api.production.com
 ```
 
 ## 🆘 Troubleshooting
