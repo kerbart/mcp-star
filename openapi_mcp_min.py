@@ -18,7 +18,7 @@ APP_NAME = "openapi-mcp-min"
 APP_VER = "0.1.0"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
-# MCP Server capabilities and info
+# MCP Server capabilities and info - will be updated with OpenAPI info
 SERVER_INFO = {
     "name": APP_NAME,
     "version": APP_VER
@@ -27,6 +27,10 @@ SERVER_INFO = {
 SERVER_CAPABILITIES = {
     "tools": {
         "listChanged": False
+    },
+    "auth": {
+        "bearer": True,
+        "apiKey": True
     }
 }
 
@@ -35,14 +39,68 @@ SERVER_CAPABILITIES = {
 # ------------------------------
 async def fetch_text(url: str) -> str:
     verify = os.getenv("SKIP_TLS_VERIFY") not in ("1", "true", "TRUE")
+    print(f"Fetching OpenAPI document from: {url}")
+
+    # First try with httpx (original approach)
     try:
-        async with httpx.AsyncClient(verify=verify, timeout=20) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            return r.text
+        async with httpx.AsyncClient(
+            verify=verify,
+            timeout=30.0,
+            http2=False,
+            follow_redirects=True
+        ) as client:
+            print(f"Attempting httpx connection to {url}...")
+            response = await client.get(url)
+            print(f"Response status: {response.status_code}")
+            response.raise_for_status()
+            return response.text
+
     except httpx.ConnectError as e:
-        print(f"Connection error while fetching {url}: {e}")
-        raise RuntimeError(f"Unable to connect to {url}. Please check the URL and network connectivity.")
+        print(f"httpx connection failed: {e}")
+        print(f"Falling back to urllib approach...")
+
+        # Fallback to urllib for local network compatibility
+        try:
+            import urllib.request
+            import urllib.error
+            import ssl
+            import asyncio
+            from urllib.parse import urlparse
+
+            # Configure SSL context if needed
+            if url.startswith('https://') and not verify:
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+            else:
+                ssl_context = None
+
+            def fetch_sync():
+                headers = {
+                    'User-Agent': 'openapi-mcp-min/0.1.0',
+                    'Accept': 'application/json, application/yaml, text/yaml, */*'
+                }
+
+                req = urllib.request.Request(url, headers=headers)
+
+                if ssl_context and url.startswith('https://'):
+                    response = urllib.request.urlopen(req, context=ssl_context, timeout=30)
+                else:
+                    response = urllib.request.urlopen(req, timeout=30)
+
+                content = response.read().decode('utf-8')
+                print(f"urllib response status: {response.status}")
+                return content
+
+            # Run the synchronous urllib call in a thread pool
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(None, fetch_sync)
+            return content
+
+        except Exception as urllib_error:
+            print(f"urllib fallback also failed: {urllib_error}")
+            raise RuntimeError(f"All connection methods failed. httpx error: {e}, urllib error: {urllib_error}")
+
     except httpx.TimeoutException as e:
         print(f"Timeout error while fetching {url}: {e}")
         raise RuntimeError(f"Timeout while connecting to {url}. The server may be slow or unavailable.")
@@ -51,6 +109,7 @@ async def fetch_text(url: str) -> str:
         raise RuntimeError(f"HTTP error {e.response.status_code} while fetching {url}: {e.response.text}")
     except Exception as e:
         print(f"Unexpected error while fetching {url}: {e}")
+        print(f"Error type: {type(e).__name__}")
         raise RuntimeError(f"Failed to fetch OpenAPI documentation from {url}: {str(e)}")
 
 def parse_openapi(text: str) -> Dict[str, Any]:
@@ -133,9 +192,10 @@ def collect_params(operation: Dict[str, Any], path_item_params: List[Dict[str, A
 # Construction du catalogue
 # ------------------------------
 class Catalogue:
-    def __init__(self, base_url: str, tools: Dict[str, Tool]):
+    def __init__(self, base_url: str, tools: Dict[str, Tool], api_info: Dict[str, Any] = None):
         self.base_url = base_url.rstrip("/")
         self.tools = tools
+        self.api_info = api_info or {}
 
 async def build_catalogue(openapi_url: str, custom_base_url: str = None) -> Catalogue:
     try:
@@ -191,6 +251,19 @@ async def build_catalogue(openapi_url: str, custom_base_url: str = None) -> Cata
         parsed_openapi = urlparse(openapi_url)
         base_url = f"{parsed_openapi.scheme}://{parsed_openapi.netloc}{base_url}"
 
+    # Extract API information for MCP server info
+    api_info = {
+        "title": spec.get("info", {}).get("title", "OpenAPI"),
+        "description": spec.get("info", {}).get("description", ""),
+        "version": spec.get("info", {}).get("version", "1.0.0"),
+        "contact": spec.get("info", {}).get("contact", {}),
+        "license": spec.get("info", {}).get("license", {}),
+        "servers": spec.get("servers", []),
+        "externalDocs": spec.get("externalDocs", {}),
+        "securitySchemes": spec.get("components", {}).get("securitySchemes", {}),
+        "security": spec.get("security", [])
+    }
+
     tools: Dict[str, Tool] = {}
     paths: Dict[str, Any] = spec.get("paths", {})
     for path, path_item in paths.items():
@@ -204,7 +277,7 @@ async def build_catalogue(openapi_url: str, custom_base_url: str = None) -> Cata
             summary = op.get("summary") or op.get("description")
             tools[name] = Tool(name, method, path, summary, params, has_body)
 
-    catalogue = Catalogue(base_url, tools)
+    catalogue = Catalogue(base_url, tools, api_info)
 
     # Print detailed information about discovered tools and API configuration
     print(f"\n📋 API Configuration:", flush=True)
@@ -254,12 +327,57 @@ async def call_backend(cat: Catalogue, tool: Tool, args: Dict[str, Any]) -> http
             query[name] = args[name]
 
     headers = {}
-    if bearer := os.getenv("API_BEARER"):
+
+    # Handle authentication based on OpenAPI security schemes
+    if cat.api_info and cat.api_info.get("securitySchemes"):
+        security_schemes = cat.api_info.get("securitySchemes", {})
+
+        # Check for Bearer token authentication
+        if bearer := os.getenv("API_BEARER") or os.getenv("BEARER_TOKEN"):
+            headers["Authorization"] = f"Bearer {bearer}"
+
+        # Check for API Key authentication
+        elif api_key := os.getenv("API_KEY"):
+            # Look for API key schemes in security definitions
+            for scheme_name, scheme in security_schemes.items():
+                if scheme.get("type") == "apiKey":
+                    key_location = scheme.get("in", "header")
+                    key_name = scheme.get("name", "X-API-Key")
+
+                    if key_location == "header":
+                        headers[key_name] = api_key
+                    elif key_location == "query":
+                        query[key_name] = api_key
+                    break
+
+        # Check for Basic authentication
+        elif basic_user := os.getenv("API_USERNAME"):
+            if basic_pass := os.getenv("API_PASSWORD"):
+                import base64
+                credentials = base64.b64encode(f"{basic_user}:{basic_pass}".encode()).decode()
+                headers["Authorization"] = f"Basic {credentials}"
+
+    # Fallback for backwards compatibility
+    elif bearer := os.getenv("API_BEARER"):
         headers["Authorization"] = f"Bearer {bearer}"
 
     verify = os.getenv("SKIP_TLS_VERIFY") not in ("1", "true", "TRUE")
 
-    async with httpx.AsyncClient(base_url=cat.base_url, verify=verify, timeout=30) as client:
+    # Configure transport for better local network compatibility
+    transport = httpx.AsyncHTTPTransport(
+        verify=verify,
+        retries=2,
+        http2=False
+    )
+
+    timeout = httpx.Timeout(30.0)
+
+    async with httpx.AsyncClient(
+        base_url=cat.base_url,
+        transport=transport,
+        timeout=timeout,
+        follow_redirects=True
+    ) as client:
         url = path_filled
         method = tool.method
         full_url = f"{cat.base_url}{url}"
@@ -367,13 +485,50 @@ async def handle_jsonrpc_request(request_data: Dict[str, Any]) -> Dict[str, Any]
                 }
             }
 
+        cat: Catalogue = STATE["catalogue"]
+
+        # Build enhanced server info from OpenAPI spec
+        enhanced_server_info = SERVER_INFO.copy()
+        if cat and cat.api_info:
+            enhanced_server_info.update({
+                "name": f"{cat.api_info.get('title', APP_NAME)} MCP Bridge",
+                "version": f"{cat.api_info.get('version', '1.0.0')} (MCP {APP_VER})",
+                "description": cat.api_info.get('description', 'MCP server that proxies OpenAPI/REST API endpoints as tools'),
+                "contact": cat.api_info.get('contact'),
+                "license": cat.api_info.get('license'),
+                "externalDocs": cat.api_info.get('externalDocs')
+            })
+
+            # Add authentication information for MCP clients
+            if cat.api_info.get('securitySchemes'):
+                auth_schemes = []
+                for scheme_name, scheme in cat.api_info.get('securitySchemes', {}).items():
+                    auth_info = {
+                        "name": scheme_name,
+                        "type": scheme.get("type"),
+                        "description": scheme.get("description", "")
+                    }
+                    if scheme.get("type") == "apiKey":
+                        auth_info.update({
+                            "in": scheme.get("in"),
+                            "name": scheme.get("name")
+                        })
+                    elif scheme.get("type") == "http":
+                        auth_info["scheme"] = scheme.get("scheme")
+                    auth_schemes.append(auth_info)
+
+                enhanced_server_info["authenticationSchemes"] = auth_schemes
+
+            # Remove None values
+            enhanced_server_info = {k: v for k, v in enhanced_server_info.items() if v is not None}
+
         return {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": SERVER_CAPABILITIES,
-                "serverInfo": SERVER_INFO
+                "serverInfo": enhanced_server_info
             }
         }
 
@@ -468,7 +623,9 @@ async def handle_jsonrpc_request(request_data: Dict[str, Any]) -> Dict[str, Any]
 @app.get("/")
 async def root():
     cat: Catalogue = STATE["catalogue"]
-    return {
+
+    # Build response with OpenAPI information if available
+    response = {
         "name": "OpenAPI MCP Bridge",
         "version": APP_VER,
         "description": "MCP server that proxies OpenAPI/REST API endpoints as tools",
@@ -487,6 +644,52 @@ async def root():
         },
         "notice": "MCP clients must use POST / for proper protocol communication"
     }
+
+    # Add OpenAPI information if available
+    if cat and cat.api_info:
+        response.update({
+            "api_title": cat.api_info.get('title'),
+            "api_description": cat.api_info.get('description'),
+            "api_version": cat.api_info.get('version'),
+            "api_contact": cat.api_info.get('contact'),
+            "api_license": cat.api_info.get('license'),
+            "api_external_docs": cat.api_info.get('externalDocs'),
+            "api_servers": cat.api_info.get('servers')
+        })
+
+        # Add authentication information
+        if cat.api_info.get('securitySchemes'):
+            auth_info = {
+                "available_schemes": [],
+                "environment_variables": {
+                    "API_BEARER or BEARER_TOKEN": "Bearer token for Authorization header",
+                    "API_KEY": "API key (location determined by OpenAPI spec)",
+                    "API_USERNAME + API_PASSWORD": "Basic authentication credentials"
+                }
+            }
+
+            for scheme_name, scheme in cat.api_info.get('securitySchemes', {}).items():
+                scheme_info = {
+                    "name": scheme_name,
+                    "type": scheme.get("type"),
+                    "description": scheme.get("description", "")
+                }
+                if scheme.get("type") == "apiKey":
+                    scheme_info.update({
+                        "location": scheme.get("in"),
+                        "parameter_name": scheme.get("name")
+                    })
+                elif scheme.get("type") == "http":
+                    scheme_info["scheme"] = scheme.get("scheme")
+
+                auth_info["available_schemes"].append(scheme_info)
+
+            response["authentication"] = auth_info
+
+        # Remove None values
+        response = {k: v for k, v in response.items() if v is not None}
+
+    return response
 
 @app.options("/")
 async def options_root():
