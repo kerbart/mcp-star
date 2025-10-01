@@ -13,6 +13,11 @@ A lightweight, single-file MCP (Model Context Protocol) server that automaticall
 - ⚡ **Single file**: Just one Python file - easy to deploy anywhere
 - 🔧 **Zero config**: Works out of the box with any valid OpenAPI URL
 - 🎯 **Flexible API targeting**: Override API base URL independently from OpenAPI docs
+- 🔐 **Multi-auth support**: Bearer, API Key, and Basic authentication
+- 📡 **SSE streaming**: Server-Sent Events support for real-time connections
+- 🔍 **Debug mode**: Verbose logging for troubleshooting
+- 🛣️ **Context paths**: Deploy under custom URL paths
+- 🌍 **Network resilient**: Automatic fallback for local network compatibility
 
 ## 🚀 Quick Start
 
@@ -45,14 +50,24 @@ PORT=7744 python openapi_mcp_min.py https://api.example.com/openapi.json
 # Override API base URL (useful when docs and API are hosted separately)
 python openapi_mcp_min.py http://localhost:8080/api-docs --api-base-url https://api.production.com
 
+# Set public MCP server URL (for multi-host deployments)
+python openapi_mcp_min.py http://localhost:8080/api-docs --public-url https://mcp.example.com
+
+# Add context path prefix to all routes
+python openapi_mcp_min.py http://localhost:8080/api-docs --context-path /mcp
+
 # Start in degraded mode (even if API is unreachable)
 python openapi_mcp_min.py http://unreachable-api.com/docs --ignore-errors
 
-# Combine custom base URL with other options
-python openapi_mcp_min.py http://localhost:8080/api-docs --api-base-url https://api.example.com --ignore-errors
+# Enable verbose debug logging
+DEBUG=1 python openapi_mcp_min.py http://localhost:8080/api-docs
 
-# With custom port and error ignoring
-PORT=9000 python openapi_mcp_min.py http://localhost:3000/api-docs --ignore-errors
+# Combine all options
+DEBUG=1 PORT=9000 python openapi_mcp_min.py http://localhost:8080/api-docs \
+  --api-base-url https://api.example.com \
+  --public-url https://mcp.example.com \
+  --context-path /api/mcp \
+  --ignore-errors
 ```
 
 ## 📋 What You'll See
@@ -101,9 +116,15 @@ Once running, the server provides these endpoints:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `POST /` | POST | 🎯 Main MCP JSON-RPC endpoint |
-| `GET /` | GET | ℹ️ Server info and status |
+| `GET /` | GET | ℹ️ Server info and status (also SSE stream with `Accept: text/event-stream`) |
 | `GET /health` | GET | ❤️ Health check |
 | `GET /tools` | GET | 🔧 List all available tools |
+| `GET /tools/list` | GET/POST | 📋 MCP tools list endpoint |
+| `GET /resources/list` | GET | 📦 MCP resources (empty) |
+| `GET /prompts/list` | GET | 💬 MCP prompts (empty) |
+| `POST /tools/{tool_name}` | POST | ⚙️ Direct tool execution |
+
+**Note:** All endpoints respect the `--context-path` prefix if configured.
 
 ## 🐛 Error Handling
 
@@ -135,8 +156,21 @@ Once running, the server provides these endpoints:
 Set environment variables for API authentication:
 
 ```bash
-# Bearer token authentication
+# Bearer token authentication (preferred)
 export API_BEARER="your-api-token"
+python openapi_mcp_min.py https://api.example.com/openapi.json
+
+# Alternative bearer token variable
+export BEARER_TOKEN="your-api-token"
+python openapi_mcp_min.py https://api.example.com/openapi.json
+
+# API Key authentication (auto-detects header/query placement from OpenAPI spec)
+export API_KEY="your-api-key"
+python openapi_mcp_min.py https://api.example.com/openapi.json
+
+# Basic authentication
+export API_USERNAME="your-username"
+export API_PASSWORD="your-password"
 python openapi_mcp_min.py https://api.example.com/openapi.json
 
 # Skip TLS verification (for development)
@@ -149,9 +183,24 @@ python openapi_mcp_min.py https://self-signed-api.com/docs
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `PORT` | Server port | `8765` |
+| `DEBUG` | Enable verbose debug logging (`1`, `true`, `yes`) | `false` |
 | `API_BEARER` | Bearer token for API auth | None |
-| `SKIP_TLS_VERIFY` | Skip TLS verification | `false` |
+| `BEARER_TOKEN` | Alternative bearer token variable | None |
+| `API_KEY` | API key for authentication | None |
+| `API_USERNAME` | Username for basic auth | None |
+| `API_PASSWORD` | Password for basic auth | None |
+| `SKIP_TLS_VERIFY` | Skip TLS verification (`1`, `true`, `TRUE`) | `false` |
 | `API_BASE_URL` | Fallback API base URL | `http://localhost:8080` |
+
+## 🎯 Command Line Arguments
+
+| Argument | Description | Example |
+|----------|-------------|---------|
+| `<OPENAPI_URL>` | OpenAPI spec URL (required) | `http://localhost:8080/api-docs` |
+| `--api-base-url` | Override API base URL | `--api-base-url https://api.example.com` |
+| `--public-url` | Public MCP server URL | `--public-url https://mcp.example.com` |
+| `--context-path` | Context path prefix for all routes | `--context-path /mcp` |
+| `--ignore-errors` | Start in degraded mode if API unreachable | `--ignore-errors` |
 
 ## 🎨 Examples
 
@@ -175,6 +224,19 @@ python openapi_mcp_min.py http://localhost:3000/api-docs --ignore-errors
 ```bash
 # Get OpenAPI docs from staging but proxy calls to production
 python openapi_mcp_min.py http://staging.api.com/docs --api-base-url https://api.production.com
+```
+
+### 🛣️ Context Path Deployment
+```bash
+# Deploy under /api/mcp path (useful for reverse proxies)
+python openapi_mcp_min.py http://localhost:8080/api-docs --context-path /api/mcp
+# Access at: http://localhost:8765/api/mcp/
+```
+
+### 🔍 Debug Mode
+```bash
+# Enable verbose logging for troubleshooting
+DEBUG=1 python openapi_mcp_min.py http://localhost:8080/api-docs
 ```
 
 ## 🆘 Troubleshooting
